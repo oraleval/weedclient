@@ -381,24 +381,66 @@ func (this *weedclient) DoWrite(refPath string, data []byte, params string) (str
 
 }
 
+// FileLocation 表示文件位置, 当前使用URL字段
+type FileLocation struct {
+	PublicURL string `json:"publicUrl"`
+	URL       string `json:"url"`
+}
+
+// VolumeInfo 表示从seaweedfs中获取的文件信息
+type VolumeInfo struct {
+	VolumeId  string         `json:"volumeId"`
+	Locations []FileLocation `json:"locations"`
+}
+
 func (this *weedclient) DoDelete(path string) error {
-	req, err := http.NewRequest("DELETE", "http://"+this.root+"/"+path, nil)
+	//req, err := http.NewRequest("DELETE", "http://"+this.root+"/"+path, nil)
+	idx := strings.IndexByte(path, ',')
+	if idx == -1 {
+		return fmt.Errorf("invalid seaweedfs file path: %s", path)
+	}
+	volumeId := path[0:idx]
+	// 先获取文件所在的volume位置
+	rsp, err := http.Get("http://" + this.root + "/dir/lookup?volumeId=" + volumeId)
 	if err != nil {
 		if this.selectNewMasterPeer() {
-			req, err = http.NewRequest("DELETE", "http://"+this.root+"/"+path, nil)
+			rsp, err = http.Get("http://" + this.root + "/dir/lookup?volumeId=" + path)
 		}
 	}
 	if err != nil {
 		return err
 	}
-	rsp, err := this.hc.Do(req)
-	rsp.Body.Close()
+
+	defer rsp.Body.Close()
+	b, err := ioutil.ReadAll(rsp.Body)
 	if err != nil {
 		return err
 	}
-	if rsp.StatusCode != 200 {
+
+	var info VolumeInfo
+	err = json.Unmarshal(b, &info)
+	if err != nil {
+		return err
+	}
+
+	if len(info.Locations) == 0 || len(info.Locations[0].URL) == 0 {
+		return fmt.Errorf("couldn't find the file information in seaweedfs, file: %s", path)
+	}
+
+	// 发起删除文件调用
+	req, err := http.NewRequest("DELETE", "http://"+info.Locations[0].URL+"/"+path, nil)
+	if err != nil {
+		return err
+	}
+	rsp, err = this.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	rsp.Body.Close()
+	if rsp.StatusCode < 200 || rsp.StatusCode >= 300 {
 		return errors.New(fmt.Sprint("response status ", rsp.StatusCode))
 	}
+
 	return nil
 }
 
