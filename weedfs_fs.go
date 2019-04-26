@@ -410,15 +410,11 @@ func (this *weedclient) DoDelete(path string) error {
 	if err != nil {
 		return err
 	}
-
 	defer rsp.Body.Close()
-	b, err := ioutil.ReadAll(rsp.Body)
-	if err != nil {
-		return err
-	}
 
 	var info VolumeInfo
-	err = json.Unmarshal(b, &info)
+	dec := json.NewDecoder(rsp.Body)
+	err = dec.Decode(&info)
 	if err != nil {
 		return err
 	}
