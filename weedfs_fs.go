@@ -27,7 +27,53 @@ type weedclient struct {
 	lastVolumeUrlQuery int64
 	lastMasterSwitch   int64
 	masters            []string
-	rootLock           *sync.Mutex
+	failStatus         []bool
+
+	rootLock *sync.Mutex
+}
+
+func (w *weedclient) getRoot() string {
+	w.rootLock.Lock()
+	defer w.rootLock.Unlock()
+
+	return w.root
+}
+
+// curl http://xxx.xxx.xxx.xxxx:9133/cluster/status
+// 当作健康检查API使用
+func (w *weedclient) getClusterStatus(url string) error {
+	root := w.getRoot()
+	if url == "" {
+		url = root + "/cluster/status"
+	}
+
+	_, err := get(w.hc, url)
+	return err
+}
+
+func (w *weedclient) changeStatus(url string) {
+
+	for k := range w.failStatus {
+
+		// todo lock, unlock
+		// 暂定，不加锁修改状态，因为bool变量只有true, false, 两个状态
+		if err := w.getClusterStatus(url); err == nil {
+			// todo delete print
+			w.failStatus[k] = true
+		} else {
+			w.failStatus[k] = false
+		}
+
+	}
+}
+
+func (w *weedclient) changeStatusLoop() {
+
+	for {
+
+		w.changeStatus("")
+		time.Sleep(time.Second)
+	}
 }
 
 type volLookUpRst struct {
@@ -38,7 +84,7 @@ type volLookUpRst struct {
 
 func fetchVolumeUrlFromMaster(hc *http.Client, root string, id string) (ret []string, err error) {
 	var buf []byte
-	buf, err = get(hc, root+"/dir/lookup?volumeId="+id, true)
+	buf, err = get(hc, root+"/dir/lookup?volumeId="+id)
 	if err != nil {
 		return
 	}
@@ -59,7 +105,7 @@ func fetchVolumeUrlFromMaster(hc *http.Client, root string, id string) (ret []st
 }
 
 func fetchFile(hc *http.Client, path string) ([]byte, error) {
-	buf, err := get(hc, path, true)
+	buf, err := get(hc, path)
 	if err != nil {
 		return nil, err
 	}
@@ -82,16 +128,9 @@ func getVolId(path string) (string, error) {
 
 func NewWeedFsClient(hc *http.Client, masterPeers string) Fs {
 	log.Println("new seaweedfs client to", masterPeers)
-	/*hc := http.Client{
-		Transport:&http.Transport{
-			Dial:(&net.Dialer{
-				Timeout:5 * time.Second,
-				KeepAlive:30 * time.Second,
-			}).Dial,
-			MaxIdleConnsPerHost:100,
-		},
-	}*/
+
 	ps := strings.Split(masterPeers, ",")
+
 	ret := &weedclient{
 		root:       ps[0],
 		rootLock:   &sync.Mutex{},
@@ -102,26 +141,65 @@ func NewWeedFsClient(hc *http.Client, masterPeers string) Fs {
 		lastVolumeUrlQuery: 0,
 		lastMasterSwitch:   0,
 		masters:            ps,
+		failStatus:         make([]bool, len(ps)),
 	}
 
+	for k := range ret.failStatus {
+		ret.failStatus[k] = true
+	}
+
+	go ret.changeStatusLoop()
 	return ret
 }
 
 func (this *weedclient) selectNewMasterPeer() bool {
+
 	rnd := rand.New(rand.NewSource(time.Now().Unix()))
 	if len(this.masters) <= 1 {
 		return false
 	}
+
 	this.rootLock.Lock()
 	defer this.rootLock.Unlock()
-	if time.Now().Unix()-this.lastMasterSwitch < VOL_URL_QUERY_INTERVAL {
+
+	//把root节点设置为坏的
+	for k := range this.masters {
+		if this.masters[k] == this.root {
+			this.failStatus[k] = false
+		}
+	}
+
+	idx := 0
+	//使用随机算法选择一个url
+	for maxTry := 100; maxTry > 0; maxTry-- {
+		idx = rnd.Intn(len(this.masters))
+		if this.failStatus[idx] == true {
+			goto setRoot
+		}
+	}
+
+	//随机算法没有找到url，直接遍历查找
+	for ; idx < len(this.masters); idx++ {
+
+		if this.masters[idx] == this.root {
+			continue
+		}
+
+		if this.failStatus[idx] == false {
+			continue
+		}
+		break
+
+	}
+
+	// not found, master全部挂了
+	if idx == len(this.masters) {
 		return false
 	}
-	idx := 0
-	for this.masters[idx] == this.root {
-		idx = rnd.Intn(len(this.masters))
-	}
+
+setRoot:
 	this.root = this.masters[idx]
+
 	this.lastMasterSwitch = time.Now().Unix()
 
 	return true
@@ -166,10 +244,10 @@ func (this *weedclient) getVolumeUrl(path string, exclude string) (string, error
 		lastQuerySec := atomic.LoadInt64(&this.lastVolumeUrlQuery)
 		nowSec := time.Now().Unix()
 		if nowSec-lastQuerySec > VOL_URL_QUERY_INTERVAL {
-			vurls, err := fetchVolumeUrlFromMaster(this.hc, "http://"+this.root, vid)
+			vurls, err := fetchVolumeUrlFromMaster(this.hc, "http://"+this.getRoot(), vid)
 			if err != nil {
 				if this.selectNewMasterPeer() {
-					vurls, err = fetchVolumeUrlFromMaster(this.hc, "http://"+this.root, vid)
+					vurls, err = fetchVolumeUrlFromMaster(this.hc, "http://"+this.getRoot(), vid)
 				}
 			}
 			atomic.StoreInt64(&this.lastVolumeUrlQuery, time.Now().Unix())
@@ -181,10 +259,10 @@ func (this *weedclient) getVolumeUrl(path string, exclude string) (string, error
 			this.volMapLock.Unlock()
 		}
 	case NOT_CACHED_YET:
-		vurls, err := fetchVolumeUrlFromMaster(this.hc, "http://"+this.root, vid)
+		vurls, err := fetchVolumeUrlFromMaster(this.hc, "http://"+this.getRoot(), vid)
 		if err != nil {
 			if this.selectNewMasterPeer() {
-				vurls, err = fetchVolumeUrlFromMaster(this.hc, "http://"+this.root, vid)
+				vurls, err = fetchVolumeUrlFromMaster(this.hc, "http://"+this.getRoot(), vid)
 			}
 		}
 		if err != nil {
@@ -238,13 +316,7 @@ type wroteRst struct {
 	Size int    `json:"size"`
 }
 
-func post(hc *http.Client, url string, content_type string, body []byte, failTry bool) (rspBody []byte, err error) {
-	defer func() {
-		if err != nil && failTry {
-			rspBody, err = post(hc, url, content_type, body, false)
-		}
-	}()
-
+func post(hc *http.Client, url string, content_type string, body []byte) (rspBody []byte, err error) {
 	var req *http.Request
 	var rsp *http.Response
 	req, err = http.NewRequest("POST", url, bytes.NewBuffer(body))
@@ -260,13 +332,7 @@ func post(hc *http.Client, url string, content_type string, body []byte, failTry
 	return
 }
 
-func get(hc *http.Client, url string, failTry bool) (rspBody []byte, err error) {
-	defer func() {
-		if err != nil && failTry {
-			rspBody, err = get(hc, url, false)
-		}
-	}()
-
+func get(hc *http.Client, url string) (rspBody []byte, err error) {
 	var req *http.Request
 	var rsp *http.Response
 	req, err = http.NewRequest("GET", url, nil)
@@ -282,13 +348,7 @@ func get(hc *http.Client, url string, failTry bool) (rspBody []byte, err error) 
 	return
 }
 
-func multiPartPut(hc *http.Client, url string, fileName string, body []byte, failTry bool) (rspBody []byte, err error) {
-	defer func() {
-		if err != nil && failTry {
-			rspBody, err = multiPartPut(hc, url, fileName, body, false)
-		}
-	}()
-
+func multiPartPut(hc *http.Client, url string, fileName string, body []byte) (rspBody []byte, err error) {
 	var req *http.Request
 	var rsp *http.Response
 	var wr io.Writer
@@ -327,10 +387,10 @@ func multiPartPut(hc *http.Client, url string, fileName string, body []byte, fai
 }
 
 func (this *weedclient) DoWrite(refPath string, data []byte, params string) (string, error) {
-	buf, err := post(this.hc, "http://"+this.root+"/dir/assign"+params, "text/plain", nil, true)
+	buf, err := post(this.hc, "http://"+this.root+"/dir/assign"+params, "text/plain", nil)
 	if err != nil {
 		if this.selectNewMasterPeer() {
-			buf, err = post(this.hc, "http://"+this.root+"/dir/assign"+params, "text/plain", nil, true)
+			buf, err = post(this.hc, "http://"+this.root+"/dir/assign"+params, "text/plain", nil)
 		}
 	}
 	if err != nil {
@@ -362,7 +422,7 @@ func (this *weedclient) DoWrite(refPath string, data []byte, params string) (str
 		return "", err
 	}
 
-	buf, err = multiPartPut(this.hc, rst.PublicUrl+"/"+fid, refPath, data, true)
+	buf, err = multiPartPut(this.hc, rst.PublicUrl+"/"+fid, refPath, data)
 	wroteRst := wroteRst{Size: -1}
 	//log.Println("upload response:", string(buf))
 	if err := json.Unmarshal(buf, &wroteRst); err != nil {
