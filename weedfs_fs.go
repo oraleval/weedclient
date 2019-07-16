@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
 	//"net"
 	"math/rand"
 	"sync/atomic"
@@ -39,31 +40,47 @@ func (w *weedclient) getRoot() string {
 	return w.root
 }
 
-// curl http://xxx.xxx.xxx.xxxx:9133/cluster/status
-// 当作健康检查API使用
-func (w *weedclient) getClusterStatus(url string) error {
-	root := w.getRoot()
-	if url == "" {
-		url = root + "/cluster/status"
+func (w *weedclient) getClusterUrl(url string) string {
+	if strings.HasPrefix(url, "http://") {
+		// Test function needs to be used
+		return url
 	}
 
-	_, err := get(w.hc, url)
-	return err
+	return "http://" + url + "/cluster/status"
 }
 
-func (w *weedclient) changeStatus(url string) {
+// curl http://xxx.xxx.xxx.xxxx:9133/cluster/status
+// 当作健康检查API使用
+func (w *weedclient) getClusterStatus(url string) (err error) {
+	_, err = get(w.hc, url)
+	return
+}
 
-	for k := range w.failStatus {
+func (w *weedclient) changeStatus() {
 
-		// todo lock, unlock
-		// 暂定，不加锁修改状态，因为bool变量只有true, false, 两个状态
-		if err := w.getClusterStatus(url); err == nil {
+	ok := -1
+	rootFail := false
+	for k := 0; k < len(w.failStatus); k++ {
+
+		var err error
+		if err = w.getClusterStatus(w.getClusterUrl(w.masters[k])); err == nil {
 			// todo delete print
 			w.failStatus[k] = true
+			ok = k
 		} else {
 			w.failStatus[k] = false
+			if w.masters[k] == w.root {
+				rootFail = true
+			}
 		}
+		// todo lock, unlock
+		// 暂定，不加锁修改状态，因为bool变量只有true, false, 两个状态
+		//fmt.Printf("w = %p, k = %d, w.failStatus = %v, err = %v\n", w, k, w.failStatus, err)
 
+	}
+
+	if rootFail && ok >= 0 {
+		w.root = w.masters[ok]
 	}
 }
 
@@ -71,8 +88,8 @@ func (w *weedclient) changeStatusLoop() {
 
 	for {
 
-		w.changeStatus("")
-		time.Sleep(time.Second)
+		w.changeStatus()
+		time.Sleep(time.Second * 2)
 	}
 }
 
@@ -166,6 +183,7 @@ func (this *weedclient) selectNewMasterPeer() bool {
 	for k := range this.masters {
 		if this.masters[k] == this.root {
 			this.failStatus[k] = false
+			break
 		}
 	}
 
@@ -179,11 +197,7 @@ func (this *weedclient) selectNewMasterPeer() bool {
 	}
 
 	//随机算法没有找到url，直接遍历查找
-	for ; idx < len(this.masters); idx++ {
-
-		if this.masters[idx] == this.root {
-			continue
-		}
+	for idx = 0; idx < len(this.masters); idx++ {
 
 		if this.failStatus[idx] == false {
 			continue

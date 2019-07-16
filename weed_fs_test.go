@@ -49,12 +49,25 @@ func TestChangesStatusLoop(t *testing.T) {
 		failStatus: []bool{false, false, false},
 	}
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Logf("test server\n")
-		fmt.Fprintln(w, "test server")
+	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("test server1 \n")
+		fmt.Fprintln(w, "test server1")
 	}))
 
-	w.changeStatus(ts.URL)
+	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("test server2 \n")
+		fmt.Fprintln(w, "test server2")
+	}))
+
+	ts3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("test server3 \n")
+		fmt.Fprintln(w, "test server3")
+	}))
+
+	w.masters = []string{ts1.URL, ts2.URL, ts3.URL}
+	w.root = ts1.URL
+
+	w.changeStatus()
 
 	for _, v := range w.failStatus {
 		if !v {
