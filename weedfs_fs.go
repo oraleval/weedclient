@@ -385,7 +385,7 @@ func multiPartPut(hc *http.Client, url string, fileName string, body []byte) (rs
 	}
 	multipartWriter.Close()
 
-	req, err = http.NewRequest("PUT", url, bytes.NewBuffer(rawMultipart.Bytes()))
+	req, err = http.NewRequest("POST", url, bytes.NewBuffer(rawMultipart.Bytes()))
 	if err != nil {
 		return
 	}
