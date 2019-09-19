@@ -448,7 +448,7 @@ func (this *weedclient) DoWrite(refPath string, data []byte, params string) (str
 	}
 
 	if wroteRst.Size != len(data) {
-		return "", errors.New(fmt.Sprintf("wrote %d but required %d", wroteRst.Size, len(data)))
+		return "", errors.New(fmt.Sprintf("wrote %d but required %d, fid:%s", wroteRst.Size, len(data), fid))
 	}
 
 	return fid, nil
